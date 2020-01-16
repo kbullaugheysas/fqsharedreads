@@ -9,6 +9,7 @@ import (
 	"log"
 	"os"
 	"strings"
+	"sync"
 )
 
 /* This program takes a reference sample, and a file lising other fastq files
@@ -28,6 +29,15 @@ type Args struct {
 }
 
 var args = Args{}
+
+// We keep track of sequences we're looking for. After the reference seqeunce
+// is read in, this will not be written to again. And in particular, it's
+// treated as read-only by the goroutines, and so simultaneous access is okay.
+var sampleSequences map[string]bool
+
+// This should only be accessed when setting up the initial set of keys and by
+// the reader goroutine.
+var refseq map[string]string
 
 /* Provide an ambidexterous interface to files to read that may be gzipped */
 type AmbiReader struct {
@@ -172,6 +182,56 @@ func init() {
 	}
 }
 
+func scanFastQ(sampleId, fn1, fn2 string, ch chan string, wg *sync.WaitGroup) {
+	defer wg.Done()
+
+	sample := PairedEndReader{}
+	err := sample.Open(fn1, fn2)
+	if err != nil {
+		log.Fatalf("Failed to open fastq files for sample %s: %v", sampleId, err)
+	}
+	defer sample.Close()
+
+	for {
+		mates, err := sample.Read()
+		if err != nil {
+			log.Fatal("Failed reading from sample %s fastq at record %d: %v", sampleId, sample.Records, err)
+		}
+		if len(mates) == 0 {
+			break
+		}
+		key := mates[0] + ":" + mates[1]
+		_, present := sampleSequences[key]
+		if present {
+			serialized := key + "@" + sampleId
+			ch <- serialized
+		}
+		if args.Limit > 0 && sample.Records >= args.Limit {
+			return
+		}
+	}
+}
+
+func recordSamples(hits chan string, done chan int) {
+	// Loop until our channel is closed
+	numHits := 1
+	for serialized := range hits {
+		tuple := strings.Split(serialized, "@")
+		if len(tuple) != 2 {
+			log.Fatalf("received tuple of length %d from channel", len(tuple))
+		}
+		key := tuple[0]
+		sampleId := tuple[1]
+		sep := ""
+		if len(refseq[key]) > 0 {
+			sep = ","
+		}
+		refseq[key] = refseq[key] + sep + sampleId
+		numHits++
+	}
+	done <- numHits
+}
+
 func main() {
 	flag.Parse()
 
@@ -209,7 +269,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to open reference fastq files: %v", err)
 	}
-	refseq := make(map[string]string, 0)
+	refseq = make(map[string]string, 0)
+	sampleSequences = make(map[string]bool, 0)
 	for {
 		mates, err := ref.Read()
 		if err != nil {
@@ -220,6 +281,7 @@ func main() {
 		}
 		key := mates[0] + ":" + mates[1]
 		refseq[key] = ""
+		sampleSequences[key] = true
 		if args.Limit > 0 && ref.Records >= args.Limit {
 			log.Println("Warning: reached refseq limit")
 			break
@@ -227,39 +289,33 @@ func main() {
 	}
 	ref.Close()
 
+	// Wait until all our goroutines are done
+	var wg sync.WaitGroup
+	wg.Add(len(fastqFiles))
+
+	// Make a channel that all our fastq goroutines will write to
+	hits := make(chan string)
+
+	// Make another channel that we'll wait on to detect that our reader has finished.
+	done := make(chan int)
+
 	for _, tuple := range fastqFiles {
-		sampleId := tuple[0]
-		log.Println("Processing sample", sampleId)
-		sample := PairedEndReader{}
-		err = sample.Open(tuple[1], tuple[2])
-		if err != nil {
-			log.Fatalf("Failed to open fastq files for sample %s: %v", sampleId, err)
-		}
-		for {
-			mates, err := sample.Read()
-			if err != nil {
-				log.Fatal("Failed reading from sample %s fastq at record %d: %v", sampleId, sample.Records, err)
-			}
-			if len(mates) == 0 {
-				break
-			}
-			key := mates[0] + ":" + mates[1]
-			_, present := refseq[key]
-			if present {
-				sep := ""
-				if len(refseq[key]) > 0 {
-					sep = ","
-				}
-				refseq[key] = refseq[key] + sep + sampleId
-			}
-			if args.Limit > 0 && sample.Records >= args.Limit {
-				break
-			}
-		}
-		sample.Close()
+		go scanFastQ(tuple[0], tuple[1], tuple[2], hits, &wg)
 	}
 
-	log.Println("writing output")
+	// Lanuch a goroutine to read from the channel. This goroutine will be done
+	// when the channel is closed.
+	go recordSamples(hits, done)
+
+	// Wait for all the goroutines to be done after which we close the channel.
+	wg.Wait()
+	close(hits)
+
+	// Now wait for our reader to be done.
+	numHits := <-done
+	log.Println("Got", numHits, "hits")
+
+	log.Println("Writing output")
 	for key, list := range refseq {
 		if list != "" {
 			pieces := strings.Split(key, ":")
