@@ -21,12 +21,14 @@ import (
  */
 
 type Args struct {
+	Sample    string
 	Ref1      string
 	Ref2      string
 	FastqList string
 	Limit     int
 	Batches   int
 	Progress  string
+	Continue  string
 }
 
 var args = Args{}
@@ -175,15 +177,17 @@ func (r *PairedEndReader) Read() ([]string, error) {
 
 func init() {
 	log.SetFlags(0)
-	flag.StringVar(&args.Ref1, "ref1", "", "fastq file for read 1 of the reference sample")
-	flag.StringVar(&args.Ref2, "ref2", "", "fastq file for read 2 of the reference sample")
-	flag.StringVar(&args.FastqList, "files", "", "file that contains the list of other fastq files")
+	flag.StringVar(&args.Sample, "sample", "", "sample ID for this sample (required)")
+	flag.StringVar(&args.Ref1, "ref1", "", "fastq file for read 1 of the reference sample (required)")
+	flag.StringVar(&args.Ref2, "ref2", "", "fastq file for read 2 of the reference sample (required)")
+	flag.StringVar(&args.FastqList, "files", "", "file that contains the list of fastq files (required)")
 	flag.IntVar(&args.Limit, "limit", 0, "only consider the first LIMIT fastq records in each sample")
 	flag.IntVar(&args.Batches, "batches", 1, "process files in batches to avoid open file limits")
 	flag.StringVar(&args.Progress, "progress", "", "write data after each batch to this file")
+	flag.StringVar(&args.Continue, "continue", "", "file with output from an existing run we'll add to")
 
 	flag.Usage = func() {
-		log.Println("usage: fqseq [options]")
+		log.Println("usage: fqmultioverlap [options]")
 		flag.PrintDefaults()
 	}
 }
@@ -254,8 +258,8 @@ func writeOutput(fp io.Writer) {
 func main() {
 	flag.Parse()
 
-	if args.Ref1 == "" || args.Ref2 == "" || args.FastqList == "" {
-		log.Println("must give -ref1, -ref2, and -files arguments")
+	if args.Ref1 == "" || args.Ref2 == "" || args.FastqList == "" || args.Sample == "" {
+		log.Println("arguments -ref1, -ref2, -files, and -sample are required")
 		flag.Usage()
 		os.Exit(1)
 	}
@@ -270,6 +274,7 @@ func main() {
 	}
 	listScanner := bufio.NewScanner(fp)
 	lineNum := 0
+	foundSelf := false
 	var fastqFiles [][]string
 	for listScanner.Scan() {
 		line := listScanner.Text()
@@ -278,19 +283,106 @@ func main() {
 			log.Fatalf("malformed line %d in %s: %s", lineNum+1, args.FastqList, line)
 		}
 		lineNum++
+		if fields[0] == args.Sample {
+			if fields[1] != args.Ref1 {
+				log.Fatalf("expected mate 1 (%s) for this sample (%s) to match -ref1 (%s)",
+					args.Sample, fields[1], args.Ref1)
+			}
+			if fields[2] != args.Ref2 {
+				log.Fatalf("expected mate 2 (%s) for this sample (%s) to match -ref2 (%s)",
+					args.Sample, fields[2], args.Ref2)
+			}
+			foundSelf = true
+			continue
+		}
 		fastqFiles = append(fastqFiles, fields)
 	}
 	fp.Close()
 
+	if foundSelf {
+		log.Println("found self in file list and read files match ref1 and ref2")
+	} else {
+		log.Fatalf("failed to find self, %s, in list of fastq files", args.Sample)
+	}
+
+	// Create our global refseq data structure.
+	refseq = make(map[string]map[string]int, 0)
+	sampleSequences = make(map[string]string, 0)
+
+	if args.Continue != "" {
+		log.Println("Continuing from", args.Continue)
+		// This file should be uncompressed. If file is compressed, can come
+		// from a pipe, as this only does one pass to read in the data.
+		fp, err := os.Open(args.Continue)
+		if err != nil {
+			log.Fatalf("Failed to open continue file %s: %v", args.Continue, err)
+		}
+		contScanner := bufio.NewScanner(fp)
+		// The first two lines should give the file names used for ref1 and
+		// ref2 of the previous run. These must match exactly.
+		lineNum = 0
+		for contScanner.Scan() {
+			line := contScanner.Text()
+			if lineNum == 0 {
+				if !strings.HasPrefix(line, "# ref1 ") {
+					log.Fatalf("Line %d of continue file %s should start with comment", lineNum+1, args.Continue)
+				}
+				fn := line[7:]
+				if fn != args.Ref1 {
+					log.Fatal("ref1 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref1)
+				}
+			} else if lineNum == 1 {
+				if !strings.HasPrefix(line, "# ref2 ") {
+					log.Fatalf("Line %d of continue file %s should start with comment", lineNum+1, args.Continue)
+				}
+				fn := line[7:]
+				if fn != args.Ref2 {
+					log.Fatal("ref2 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref2)
+				}
+			}
+			lineNum++
+			if lineNum <= 2 {
+				continue
+			}
+			fields := strings.Split(line, "\t")
+
+			if len(fields) != 4 {
+				log.Fatalf("malformed line %d in %s: %s", lineNum, args.Continue, line)
+			}
+			// Sequences are keyed by the combined DNA sequences
+			key := strings.Join(fields[1:3], ":")
+			readName := fields[0]
+			samples := strings.Split(fields[3], ",")
+			// We should not see the same sequence twice in a continue file
+			_, ok := refseq[key]
+			if ok {
+				log.Fatalf("Already saw key %s in continue file %s", key, args.Continue)
+			}
+			// Load in the sa samples associated with a key
+			refseq[key] = make(map[string]int, 0)
+			for _, sampleId := range samples {
+				refseq[key][sampleId]++
+			}
+			sampleSequences[key] = readName
+		}
+		fp.Close()
+	}
+
 	log.Println("Processing ref sequence")
 	ref := PairedEndReader{}
 	err = ref.Open(args.Ref1, args.Ref2)
+	addedRef := 0
+	foundRef := 0
 	if err != nil {
 		log.Fatalf("Failed to open reference fastq files: %v", err)
 	}
-	refseq = make(map[string]map[string]int, 0)
-	sampleSequences = make(map[string]string, 0)
+	log.Println("Opened ref1", args.Ref1)
+	log.Println("Opened ref2", args.Ref2)
+	skipped := 0
 	for {
+		if (foundRef+addedRef)%1e06 == 0 && (foundRef+addedRef) > 0 {
+			log.Println(foundRef, addedRef)
+		}
 		record, err := ref.Read()
 		if err != nil {
 			log.Fatal("Failed reading reference fastq: %v", err)
@@ -302,14 +394,31 @@ func main() {
 			log.Fatalf("ref record should have 4 fields, got %d", len(record))
 		}
 		key := record[1] + ":" + record[3]
-		refseq[key] = make(map[string]int, 0)
-		sampleSequences[key] = record[0]
+		// We may already have an entry from the continue file, so only create
+		// a new map if this is a read that was not previously shared.
+		_, ok := refseq[key]
+		if ok {
+			if sampleSequences[key] != record[0] {
+				if skipped < 10 {
+					log.Printf("existing entry for %s has name %s, which is different from %s\n",
+						key, sampleSequences[key], record[0])
+				}
+				skipped++
+				continue
+			}
+			foundRef++
+		} else {
+			refseq[key] = make(map[string]int, 0)
+			sampleSequences[key] = record[0]
+			addedRef++
+		}
 		if args.Limit > 0 && ref.Records >= args.Limit {
 			log.Println("Warning: reached refseq limit")
 			break
 		}
 	}
 	ref.Close()
+	log.Println("Done processing ref sequence, found", foundRef, "and added", addedRef, "and skipped", skipped)
 
 	// Make a channel that all our fastq goroutines will write to
 	hits := make(chan string)
