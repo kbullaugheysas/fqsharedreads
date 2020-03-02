@@ -22,9 +22,9 @@ import (
 
 type Args struct {
 	Sample    string
+	FastqList string
 	Ref1      string
 	Ref2      string
-	FastqList string
 	Limit     int
 	Batches   int
 	Progress  string
@@ -178,8 +178,6 @@ func (r *PairedEndReader) Read() ([]string, error) {
 func init() {
 	log.SetFlags(0)
 	flag.StringVar(&args.Sample, "sample", "", "sample ID for this sample (required)")
-	flag.StringVar(&args.Ref1, "ref1", "", "fastq file for read 1 of the reference sample (required)")
-	flag.StringVar(&args.Ref2, "ref2", "", "fastq file for read 2 of the reference sample (required)")
 	flag.StringVar(&args.FastqList, "files", "", "file that contains the list of fastq files (required)")
 	flag.IntVar(&args.Limit, "limit", 0, "only consider the first LIMIT fastq records in each sample")
 	flag.IntVar(&args.Batches, "batches", 1, "process files in batches to avoid open file limits")
@@ -227,7 +225,7 @@ func scanFastQ(sampleId, fn1, fn2 string, ch chan string, wg *sync.WaitGroup) {
 
 func recordSamples(hits chan string, done chan int) {
 	// Loop until our channel is closed
-	numHits := 1
+	numHits := 0
 	for serialized := range hits {
 		tuple := strings.Split(serialized, "@")
 		if len(tuple) != 2 {
@@ -241,7 +239,8 @@ func recordSamples(hits chan string, done chan int) {
 	done <- numHits
 }
 
-func writeOutput(fp io.Writer) {
+func writeOutput(fp io.Writer) int {
+	sharedReads := 0
 	for key, sampleSet := range refseq {
 		if len(sampleSet) > 0 {
 			pieces := strings.Split(key, ":")
@@ -251,6 +250,19 @@ func writeOutput(fp io.Writer) {
 				list = append(list, sampleId)
 			}
 			fmt.Fprintf(fp, "%s\t%s\t%s\t%s\n", readName, pieces[0], pieces[1], strings.Join(list, ","))
+			sharedReads++
+		}
+	}
+	return sharedReads
+}
+
+func writeOverlapHeaders(fastqFiles [][]string, index map[string]int) {
+	// We only write the reminaing overlap lines when we see the first non-header line.
+	for _, fields := range fastqFiles {
+		// If the sample ID is still in our index map then we print out the overlap header
+		_, ok := index[fields[0]]
+		if ok {
+			fmt.Printf("# overlap\t%s\t%s\t%s\n", fields[0], fields[1], fields[2])
 		}
 	}
 }
@@ -258,14 +270,11 @@ func writeOutput(fp io.Writer) {
 func main() {
 	flag.Parse()
 
-	if args.Ref1 == "" || args.Ref2 == "" || args.FastqList == "" || args.Sample == "" {
-		log.Println("arguments -ref1, -ref2, -files, and -sample are required")
+	if args.FastqList == "" || args.Sample == "" {
+		log.Println("arguments -files, and -sample are required")
 		flag.Usage()
 		os.Exit(1)
 	}
-
-	fmt.Println("# ref1", args.Ref1)
-	fmt.Println("# ref2", args.Ref2)
 
 	// Read through file given with the -files argument
 	fp, err := os.Open(args.FastqList)
@@ -276,6 +285,7 @@ func main() {
 	lineNum := 0
 	foundSelf := false
 	var fastqFiles [][]string
+	fastqFilesIndex := make(map[string]int)
 	for listScanner.Scan() {
 		line := listScanner.Text()
 		fields := strings.Split(line, "\t")
@@ -284,17 +294,17 @@ func main() {
 		}
 		lineNum++
 		if fields[0] == args.Sample {
-			if fields[1] != args.Ref1 {
-				log.Fatalf("expected mate 1 (%s) for this sample (%s) to match -ref1 (%s)",
-					args.Sample, fields[1], args.Ref1)
-			}
-			if fields[2] != args.Ref2 {
-				log.Fatalf("expected mate 2 (%s) for this sample (%s) to match -ref2 (%s)",
-					args.Sample, fields[2], args.Ref2)
-			}
+			args.Ref1 = fields[1]
+			args.Ref2 = fields[2]
 			foundSelf = true
 			continue
 		}
+		// We don't expect to get the same sample a second time
+		_, ok := fastqFilesIndex[fields[0]]
+		if ok {
+			log.Fatalf("already saw sample %s in files list", fields[0])
+		}
+		fastqFilesIndex[fields[0]] = len(fastqFiles)
 		fastqFiles = append(fastqFiles, fields)
 	}
 	fp.Close()
@@ -305,10 +315,15 @@ func main() {
 		log.Fatalf("failed to find self, %s, in list of fastq files", args.Sample)
 	}
 
+	fmt.Printf("# sample\t%s\n", args.Sample)
+	fmt.Printf("# ref1\t%s\n", args.Ref1)
+	fmt.Printf("# ref2\t%s\n", args.Ref2)
+
 	// Create our global refseq data structure.
 	refseq = make(map[string]map[string]int, 0)
 	sampleSequences = make(map[string]string, 0)
 
+	wroteOverlapHeaders := false
 	if args.Continue != "" {
 		log.Println("Continuing from", args.Continue)
 		// This file should be uncompressed. If file is compressed, can come
@@ -321,28 +336,50 @@ func main() {
 		// The first two lines should give the file names used for ref1 and
 		// ref2 of the previous run. These must match exactly.
 		lineNum = 0
+		foundRef1 := false
+		foundRef2 := false
+		foundSample := false
+		samplesSeen := make(map[string]bool)
 		for contScanner.Scan() {
 			line := contScanner.Text()
-			if lineNum == 0 {
-				if !strings.HasPrefix(line, "# ref1 ") {
-					log.Fatalf("Line %d of continue file %s should start with comment", lineNum+1, args.Continue)
+			if strings.HasPrefix(line, "# ") {
+				if strings.HasPrefix(line, "# sample") {
+					sample := line[9:]
+					if sample != args.Sample {
+						log.Fatalf("continue file is for sample %s instead of sample %s", sample, args.Sample)
+					}
+					foundSample = true
+				} else if strings.HasPrefix(line, "# ref1") {
+					fn := line[7:]
+					if fn != args.Ref1 {
+						log.Fatal("ref1 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref1)
+					}
+					foundRef1 = true
+				} else if strings.HasPrefix(line, "# ref2") {
+					fn := line[7:]
+					if fn != args.Ref2 {
+						log.Fatal("ref2 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref2)
+					}
+					foundRef2 = true
+				} else if strings.HasPrefix(line, "# overlap") {
+					rest := line[10:]
+					fields := strings.Split(rest, "\t")
+					if len(fields) != 3 {
+						log.Fatalf("malformed '# overlap' line (%d): %s", lineNum+1, line)
+					}
+					samplesSeen[fields[0]] = true
+					// Ensure this sample isn't in the list of ones we plan to process, but give it an overlap header
+					// indicating it's already been processed.
+					delete(fastqFilesIndex, fields[0])
+					fmt.Println(line)
+				} else {
+					log.Fatalf("Unrecognized comment line (%d) in continue file: %s", lineNum+1, line)
 				}
-				fn := line[7:]
-				if fn != args.Ref1 {
-					log.Fatal("ref1 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref1)
-				}
-			} else if lineNum == 1 {
-				if !strings.HasPrefix(line, "# ref2 ") {
-					log.Fatalf("Line %d of continue file %s should start with comment", lineNum+1, args.Continue)
-				}
-				fn := line[7:]
-				if fn != args.Ref2 {
-					log.Fatal("ref2 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref2)
-				}
-			}
-			lineNum++
-			if lineNum <= 2 {
 				continue
+			}
+			if !wroteOverlapHeaders {
+				writeOverlapHeaders(fastqFiles, fastqFilesIndex)
+				wroteOverlapHeaders = true
 			}
 			fields := strings.Split(line, "\t")
 
@@ -365,7 +402,22 @@ func main() {
 			}
 			sampleSequences[key] = readName
 		}
+		if !foundRef1 {
+			log.Fatalf("Expecting continue file %s to have '# ref1' line", args.Continue)
+		}
+		if !foundRef2 {
+			log.Fatalf("Expecting continue file %s to have '# ref2' line", args.Continue)
+		}
+		if !foundSample {
+			log.Fatalf("Expecting continue file %s to have # sample' line", args.Continue)
+		}
 		fp.Close()
+	}
+
+	// If we haven't yet written the overlap headers, we do that now.
+	if !wroteOverlapHeaders {
+		writeOverlapHeaders(fastqFiles, fastqFilesIndex)
+		wroteOverlapHeaders = true
 	}
 
 	log.Println("Processing ref sequence")
@@ -418,7 +470,8 @@ func main() {
 		}
 	}
 	ref.Close()
-	log.Println("Done processing ref sequence, found", foundRef, "and added", addedRef, "and skipped", skipped)
+	log.Printf("Done processing ref sequence, %d cached from continue, added %d and skipped %d\n",
+		foundRef, addedRef, skipped)
 
 	// Make a channel that all our fastq goroutines will write to
 	hits := make(chan string)
@@ -450,7 +503,7 @@ func main() {
 			fp, err := os.Create(args.Progress)
 			if err == nil {
 				log.Println("writing intermediate progress to", args.Progress)
-				writeOutput(fp)
+				_ = writeOutput(fp)
 				fp.Close()
 			} else {
 				log.Println("can't write to", args.Progress, "skipping")
@@ -462,10 +515,11 @@ func main() {
 
 	// Now wait for our reader to be done.
 	numHits := <-done
-	log.Println("Got", numHits, "hits")
 
 	log.Println("Writing output")
-	writeOutput(os.Stdout)
+	sharedReads := writeOutput(os.Stdout)
+
+	log.Println("Got", sharedReads, "shared reads with", numHits, "sharing events in aggregate")
 }
 
 // END

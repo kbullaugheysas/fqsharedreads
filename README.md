@@ -31,15 +31,44 @@ Which produces something like this:
             only consider the first LIMIT fastq records in each sample
       -progress string
             write data after each batch to this file
-      -ref1 string
-            fastq file for read 1 of the reference sample (required)
-      -ref2 string
-            fastq file for read 2 of the reference sample (required)
       -sample string
             sample ID for this sample (required)
 
-## Output
+## Testing & Examples
 
-## Examples
+There is an included subdirectory, `synthetic-test-data`, that contains some tests that can be run as follows:
 
-## Implementation
+    cd synthetic-test-data
+    ./run_tests.sh
+
+These tests create random fastq data for 3 samples that vary in how many shared reads they have among them. 
+
+Once you have run the test script, you'll have a tab-separated file, `fqlist`, with contents like this:
+
+    sampleA     sampleA_1.fq    sampleA_2.fq
+    sampleB     sampleB_1.fq    sampleB_2.fq
+    sampleC     sampleC_1.fq    sampleC_2.fq
+
+This file lists the samples among which we want to examine overlap.
+
+If we want to identify shared reads from sampleC that are found in either of the other two samples, we can run the following command, which is part of the test script:
+
+    fqmultioverlap -files fqlist -sample sampleC > sampleC.shared
+
+This will produce a file something like this:
+
+    # sample        sampleC
+    # ref1          sampleC_1.fq
+    # ref2          sampleC_2.fq
+    # overlap       sampleA sampleA_1.fq    sampleA_2.fq
+    # overlap       sampleB sampleB_1.fq    sampleB_2.fq
+    lhytsyljjuad    TTTCAACGCATTGGAGGTGTGTACTTGACTCGGCAAGCGAGAAGAGCCTAAGTGTTAGTAATATTATTTCCGGTGA    AACGACCCCTTATAAGTGAGGTCGGTGAGAGGGTCCTCACGGCGGATTGTTTATTCACCATGAATCCCACCTTTTT    sampleB
+    dfqzvjbnralh    TTTGCTGAATATCTAGGGCCTCACATAAGCTTTGCCACCCCGCGACTGCGCAACTCTAATCAGAACTCGATTGCTA    AGTGAACTCCTCAGGGGTCTCGTACCCACACGCCTCCATGTTAACTCTGCACATAATCCTTGGAATTGGTGTCGCC    sampleB
+    nwubztucacpz    ACGTTTTTCAGATTTCAGTACGCCATCCTCCCACCACAACTATCACGAACGACGAAGATCCCGATATGGTTAACTA    GCTAGTATTCGTCAACCCCAGTAGAGCAACCCCACGACTAGGGAACCGACAACCTATGATTACGTCTGAGAAGTTA    sampleB
+    uwmgtyxavcvg    CAATGGGTGGTTGACCGGAGATTGGGCCACCGGTCCCCTTATACACAAGATACGGATAGATAGCTCAGGTGGATGG    AGCCTATCCCCTGCTGAACCTTCTGCCCCCGTAGGGGTCCGCCTTGCTGATTCTGCGTGTCCGTCAGGTGTCGCAT    sampleA
+    tccjqxastdug    ATGCTACGGAACCAGGTGTACCGGCATTTCGCCAAAACGTCGGTCGCCTGGAATCGGCTCGTAACCCGGTAATCCT    GTCATAGGTCGCCAGGCTGACTCTCTAACTACGCGCAAATGCTGACATATGCGCCTAAGCAGGAAACGACTGGTAG    sampleA
+    ekrluqbjcppp    TCCTCGTCGAGTCCGTGGCACGGGGGCGCGGGGAGTATCCTATGACCAGGTACCAATCTGGAATGCAGGGTCACAT    CTTGGTTAATGCGTAGTCTTAATCCGCGGAAGGCTCCTTAAGCCCGGACATGTAAAAATTCAGCCAGACCATAGCA    sampleA
+    nwajkdqvbjfw    TCAAGTTGTACTGCGATTCCGAGCTTGTACCGGTGTTTATACGGTTAGCCTACTCCTGTCACAGGATACTTCACTG    GTAAGGATAATGCTTTCCACGGCGTAGGTAAATAGGCGCATTCCTAACTCTTGACCTTCGTTCAGTAAGGGCCCCG    sampleB
+    noecghnccjrj    TTCTGAGGATCGGTGCGGATTCACCCTATTGAACTTCTGTGCGGGGAAAGCGTCTCATTCCCGCCCGTAACAGCAC    TATCACTGAGCAGTACATCTTATGGAAATTCGTACGTTAGTGTCACTCCTTCAAACTATCGTGCGCTAGGGAACCG    sampleB,sampleA
+
+
