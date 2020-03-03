@@ -1,4 +1,4 @@
-# fqmultioverlap
+# fqsharedreads
 
 ## Overview
 
@@ -28,11 +28,11 @@ There are three main possibilities for shared reads:
 
 You can see the usage help for the program as follows:
 
-    fqmultioverlap -help
+    fqsharedreads -help
 
 Which produces something like this:
 
-    usage: fqmultioverlap [options]
+    usage: fqsharedreads [options]
       -batches int
             process files in batches to avoid open file limits (default 1)
       -continue string
@@ -77,7 +77,7 @@ character followed by a space and then a label. The possible header lines are:
         after the label are the same as those given in the list of fastq files
         specified with the `-files` argument
 
-When adding more samples during a subsequent run of `fqmultioverlap`, the
+When adding more samples during a subsequent run of `fqsharedreads`, the
 output from a previous run is passed via the `-continue FILE` argument. The
 list of fastq files given with the `-files FILE` argument must include an entry
 for the reference sample, as before, and the paths must match the `ref1` and
@@ -107,7 +107,7 @@ If we want to identify shared reads from sampleC that are found in either of
 the other two samples, we can run the following command, which is part of the
 test script:
 
-    fqmultioverlap -files fqlist -sample sampleC > sampleC.shared
+    fqsharedreads -files fqlist -sample sampleC > sampleC.shared
 
 This will produce a file something like this:
 

@@ -43,12 +43,12 @@ done | tr ' ' '\t' > fqlist
 
 # First run only samples A and B
 for i in A B; do
-  fqmultioverlap -files <(head -n 2 fqlist) -sample sample${i} > sample${i}.shared
+  fqsharedreads -files <(head -n 2 fqlist) -sample sample${i} > sample${i}.shared
 done
 
 # Next add sample C to the existing A and B runs.
-fqmultioverlap -continue sampleA.shared -files fqlist -sample sampleA > sampleA.continued.shared
-fqmultioverlap -continue sampleB.shared -files fqlist -sample sampleB > sampleB.continued.shared
+fqsharedreads -continue sampleA.shared -files fqlist -sample sampleA > sampleA.continued.shared
+fqsharedreads -continue sampleB.shared -files fqlist -sample sampleB > sampleB.continued.shared
 
 # Also run sample C
-fqmultioverlap -files fqlist -sample sampleC > sampleC.shared
+fqsharedreads -files fqlist -sample sampleC > sampleC.shared
