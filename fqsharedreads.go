@@ -503,7 +503,8 @@ func main() {
 	// when the channel is closed.
 	go recordSamples(hits, done)
 
-	log.Printf("Will read %d files of %d listed in %s\n", len(fastqFiles), originalFastqCount, args.FastqList)
+	log.Printf("Will read %d files of %d listed in %s in %d batches\n",
+		len(fastqFiles), originalFastqCount, args.FastqList, args.Batches)
 	for b := 0; b < args.Batches; b++ {
 		thisBatch := 0
 
