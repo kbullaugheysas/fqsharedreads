@@ -390,10 +390,12 @@ func main() {
 				continue
 			}
 			if !wroteOverlapHeaders {
-				// We create a new ordered subset of fastqFiles that were not seen in the -continue file.
+				// We create a new ordered subset of fastqFiles that have not yet been removed from `fastqFilesIndex`.
+				// We've already removed all the ones we saw in the -continue file so the remaining ones are new ones
+				// we wish to add.
 				filteredFastqList := make([][]string, 0)
 				for _, row := range fastqFiles {
-					if _, present := fastqFilesIndex[row[0]]; !present {
+					if _, present := fastqFilesIndex[row[0]]; present {
 						// only include files we didn't see
 						filteredFastqList = append(filteredFastqList, row)
 					}
