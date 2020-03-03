@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"compress/gzip"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -256,15 +257,20 @@ func writeOutput(fp io.Writer) int {
 	return sharedReads
 }
 
-func writeOverlapHeaders(fastqFiles [][]string, index map[string]int) {
-	// We only write the reminaing overlap lines when we see the first non-header line.
+func writeOverlapHeaders(fastqFiles [][]string) {
 	for _, fields := range fastqFiles {
-		// If the sample ID is still in our index map then we print out the overlap header
-		_, ok := index[fields[0]]
-		if ok {
-			fmt.Printf("# overlap\t%s\t%s\t%s\n", fields[0], fields[1], fields[2])
-		}
+		fmt.Printf("# overlap\t%s\t%s\t%s\n", fields[0], fields[1], fields[2])
 	}
+}
+
+func logArgs() {
+	log.Println("command:", strings.Join(os.Args, " "))
+
+	bytes, err := json.Marshal(args)
+	if err != nil {
+		log.Fatal("can't serialize Args")
+	}
+	log.Println(string(bytes))
 }
 
 func main() {
@@ -276,6 +282,8 @@ func main() {
 		os.Exit(1)
 	}
 
+	logArgs()
+
 	// Read through file given with the -files argument
 	fp, err := os.Open(args.FastqList)
 	if err != nil {
@@ -284,8 +292,11 @@ func main() {
 	listScanner := bufio.NewScanner(fp)
 	lineNum := 0
 	foundSelf := false
+	// In the fastqFiles slice we store the split lines of the contents of the -files file list.
+	// We store a map of these so we can easily identify which samples have already been
+	// processed earlier in the -continue file.
 	var fastqFiles [][]string
-	fastqFilesIndex := make(map[string]int)
+	fastqFilesIndex := make(map[string]bool)
 	for listScanner.Scan() {
 		line := listScanner.Text()
 		fields := strings.Split(line, "\t")
@@ -304,10 +315,11 @@ func main() {
 		if ok {
 			log.Fatalf("already saw sample %s in files list", fields[0])
 		}
-		fastqFilesIndex[fields[0]] = len(fastqFiles)
+		fastqFilesIndex[fields[0]] = true
 		fastqFiles = append(fastqFiles, fields)
 	}
 	fp.Close()
+	originalFastqCount := len(fastqFiles)
 
 	if foundSelf {
 		log.Println("found self in file list and read files match ref1 and ref2")
@@ -378,7 +390,16 @@ func main() {
 				continue
 			}
 			if !wroteOverlapHeaders {
-				writeOverlapHeaders(fastqFiles, fastqFilesIndex)
+				// We create a new ordered subset of fastqFiles that were not seen in the -continue file.
+				filteredFastqList := make([][]string, 0)
+				for _, row := range fastqFiles {
+					if _, present := fastqFilesIndex[row[0]]; !present {
+						// only include files we didn't see
+						filteredFastqList = append(filteredFastqList, row)
+					}
+				}
+				fastqFiles = filteredFastqList
+				writeOverlapHeaders(fastqFiles)
 				wroteOverlapHeaders = true
 			}
 			fields := strings.Split(line, "\t")
@@ -412,12 +433,9 @@ func main() {
 			log.Fatalf("Expecting continue file %s to have # sample' line", args.Continue)
 		}
 		fp.Close()
-	}
-
-	// If we haven't yet written the overlap headers, we do that now.
-	if !wroteOverlapHeaders {
-		writeOverlapHeaders(fastqFiles, fastqFilesIndex)
-		wroteOverlapHeaders = true
+	} else {
+		// If we haven't yet written the overlap headers, we do that now.
+		writeOverlapHeaders(fastqFiles)
 	}
 
 	log.Println("Processing ref sequence")
@@ -483,6 +501,7 @@ func main() {
 	// when the channel is closed.
 	go recordSamples(hits, done)
 
+	log.Printf("Will read %d files of %d listed in %s\n", len(fastqFiles), originalFastqCount, args.FastqList)
 	for b := 0; b < args.Batches; b++ {
 		thisBatch := 0
 
