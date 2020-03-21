@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"math"
 	"os"
 	"strings"
 	"sync"
@@ -27,7 +28,7 @@ type Args struct {
 	Ref1      string
 	Ref2      string
 	Limit     int
-	Batches   int
+	BatchSize int
 	Progress  string
 	Continue  string
 }
@@ -181,7 +182,7 @@ func init() {
 	flag.StringVar(&args.Sample, "sample", "", "sample ID for this sample (required)")
 	flag.StringVar(&args.FastqList, "files", "", "file that contains the list of fastq files (required)")
 	flag.IntVar(&args.Limit, "limit", 0, "only consider the first LIMIT fastq records in each sample")
-	flag.IntVar(&args.Batches, "batches", 1, "process files in batches to avoid open file limits")
+	flag.IntVar(&args.BatchSize, "batch-size", 0, "process files in batches of given size to avoid too much IO (0 = unlimited, single batch)")
 	flag.StringVar(&args.Progress, "progress", "", "write data after each batch to this file")
 	flag.StringVar(&args.Continue, "continue", "", "file with output from an existing run we'll add to")
 
@@ -503,15 +504,20 @@ func main() {
 	// when the channel is closed.
 	go recordSamples(hits, done)
 
+	numBatches := 1
+	if args.BatchSize > 0 {
+		numBatches = int(math.Ceil(float64(len(fastqFiles)) / float64(args.BatchSize)))
+	}
+
 	log.Printf("Will read %d files of %d listed in %s in %d batches\n",
-		len(fastqFiles), originalFastqCount, args.FastqList, args.Batches)
-	for b := 0; b < args.Batches; b++ {
+		len(fastqFiles), originalFastqCount, args.FastqList, numBatches)
+	for b := 0; b < numBatches; b++ {
 		thisBatch := 0
 
 		// Wait until all our goroutines in this batch are done
 		var wg sync.WaitGroup
 		for i, tuple := range fastqFiles {
-			if i%args.Batches == b {
+			if i%numBatches == b {
 				go scanFastQ(tuple[0], tuple[1], tuple[2], hits, &wg)
 				wg.Add(1)
 				thisBatch++
@@ -521,7 +527,7 @@ func main() {
 		log.Printf("Processing %d samples in batch %d\n", thisBatch, b)
 		wg.Wait()
 		// Write intermediate progress, unless we're on the last batch
-		if args.Progress != "" && b != args.Batches-1 {
+		if args.Progress != "" && b != numBatches-1 {
 			fp, err := os.Create(args.Progress)
 			if err == nil {
 				log.Println("writing intermediate progress to", args.Progress)

@@ -33,8 +33,8 @@ You can see the usage help for the program as follows:
 Which produces something like this:
 
     usage: fqsharedreads [options]
-      -batches int
-            process files in batches to avoid open file limits (default 1)
+      -batch-size int
+            process files in batches of given size to avoid too much IO (0 = unlimited, single batch)
       -continue string
             file with output from an existing run we'll add to
       -files string
