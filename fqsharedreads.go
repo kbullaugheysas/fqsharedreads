@@ -365,13 +365,13 @@ func main() {
 				} else if strings.HasPrefix(line, "# ref1") {
 					fn := line[7:]
 					if fn != args.Ref1 {
-						log.Fatal("ref1 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref1)
+						log.Fatalf("ref1 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref1)
 					}
 					foundRef1 = true
 				} else if strings.HasPrefix(line, "# ref2") {
 					fn := line[7:]
 					if fn != args.Ref2 {
-						log.Fatal("ref2 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref2)
+						log.Fatalf("ref2 in continue file %s is %s, expecting %s", args.Continue, fn, args.Ref2)
 					}
 					foundRef2 = true
 				} else if strings.HasPrefix(line, "# overlap") {
