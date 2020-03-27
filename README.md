@@ -43,6 +43,8 @@ Which produces something like this:
             only consider the first LIMIT fastq records in each sample
       -progress string
             write data after each batch to this file
+      -prune
+            remove any samples that are not present in the list of fastq files
       -sample string
             sample ID for this sample (required)
 

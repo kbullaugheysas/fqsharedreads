@@ -30,6 +30,7 @@ type Args struct {
 	Limit     int
 	BatchSize int
 	Progress  string
+	Prune     bool
 	Continue  string
 }
 
@@ -44,6 +45,10 @@ var sampleSequences map[string]string
 // This should only be accessed when setting up the initial set of keys and by
 // the reader goroutine.
 var refseq map[string]map[string]int
+
+// This should only be accessed from the main goroutine. It stores a set of
+// sample IDs.
+var includedSamples map[string]bool
 
 /* Provide an ambidexterous interface to files to read that may be gzipped */
 type AmbiReader struct {
@@ -185,9 +190,10 @@ func init() {
 	flag.IntVar(&args.BatchSize, "batch-size", 0, "process files in batches of given size to avoid too much IO (0 = unlimited, single batch)")
 	flag.StringVar(&args.Progress, "progress", "", "write data after each batch to this file")
 	flag.StringVar(&args.Continue, "continue", "", "file with output from an existing run we'll add to")
+	flag.BoolVar(&args.Prune, "prune", false, "remove any samples that are not present in the list of fastq files")
 
 	flag.Usage = func() {
-		log.Println("usage: fqmultioverlap [options]")
+		log.Println("usage: fqsharedreads [options]")
 		flag.PrintDefaults()
 	}
 }
@@ -249,10 +255,18 @@ func writeOutput(fp io.Writer) int {
 			readName := sampleSequences[key]
 			list := make([]string, 0)
 			for sampleId, _ := range sampleSet {
+				if args.Prune {
+					_, keep := includedSamples[sampleId]
+					if !keep {
+						continue
+					}
+				}
 				list = append(list, sampleId)
 			}
-			fmt.Fprintf(fp, "%s\t%s\t%s\t%s\n", readName, pieces[0], pieces[1], strings.Join(list, ","))
-			sharedReads++
+			if len(list) > 0 {
+				fmt.Fprintf(fp, "%s\t%s\t%s\t%s\n", readName, pieces[0], pieces[1], strings.Join(list, ","))
+				sharedReads++
+			}
 		}
 	}
 	return sharedReads
@@ -260,6 +274,12 @@ func writeOutput(fp io.Writer) int {
 
 func writeOverlapHeaders(fastqFiles [][]string) {
 	for _, fields := range fastqFiles {
+		if args.Prune {
+			_, keep := includedSamples[fields[0]]
+			if !keep {
+				continue
+			}
+		}
 		fmt.Printf("# overlap\t%s\t%s\t%s\n", fields[0], fields[1], fields[2])
 	}
 }
@@ -298,6 +318,7 @@ func main() {
 	// processed earlier in the -continue file.
 	var fastqFiles [][]string
 	fastqFilesIndex := make(map[string]bool)
+	includedSamples = make(map[string]bool)
 	for listScanner.Scan() {
 		line := listScanner.Text()
 		fields := strings.Split(line, "\t")
@@ -316,6 +337,7 @@ func main() {
 		if ok {
 			log.Fatalf("already saw sample %s in files list", fields[0])
 		}
+		includedSamples[fields[0]] = true
 		fastqFilesIndex[fields[0]] = true
 		fastqFiles = append(fastqFiles, fields)
 	}
@@ -384,7 +406,12 @@ func main() {
 					// Ensure this sample isn't in the list of ones we plan to process, but give it an overlap header
 					// indicating it's already been processed.
 					delete(fastqFilesIndex, fields[0])
-					fmt.Println(line)
+					_, included := includedSamples[fields[0]]
+					if !args.Prune || included {
+						// If we're not pruning, or if we're pruning and this one should still be included, then
+						// output the overlap header line.
+						fmt.Println(line)
+					}
 				} else {
 					log.Fatalf("Unrecognized comment line (%d) in continue file: %s", lineNum+1, line)
 				}
